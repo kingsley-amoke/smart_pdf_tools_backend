@@ -20,6 +20,10 @@ import type { Response } from 'express';
 import { SplitMethod, SplitPdfDto } from './dto/split-pdf.dto';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
+import { deleteFile, deleteFiles } from './helpers/delete.helper';
+import { createZip } from './helpers/create-zip.helper';
+import { getPageCount } from './helpers/get-page-count.helper';
+import { getFileSize } from './helpers/check-file-size.helper';
 
 @Controller('pdf')
 export class PdfController {
@@ -159,7 +163,7 @@ export class PdfController {
       await this.pdfService.mergePdfs(inputPaths, outputPath);
 
       // Get merged file size
-      const outputSize = await this.pdfService.getFileSize(outputPath);
+      const outputSize = await getFileSize(outputPath);
 
       // Set response headers
       res.setHeader('Content-Type', 'application/pdf');
@@ -213,10 +217,10 @@ export class PdfController {
     console.log('\n🧹 Cleaning up temporary files...');
 
     // Delete input files
-    await this.pdfService.deleteFiles(inputPaths);
+    await deleteFiles(inputPaths);
 
     // Delete output file
-    await this.pdfService.deleteFile(outputPath);
+    await deleteFile(outputPath);
 
     console.log('✅ Cleanup complete\n');
   }
@@ -266,7 +270,7 @@ export class PdfController {
       filesToCleanup.push(outputDir);
 
       // Get page count
-      const pageCount = await this.pdfService.getPageCount(inputPath);
+      const pageCount = await getPageCount(inputPath);
       console.log(`📄 PDF has ${pageCount} pages`);
 
       let splitFiles: string[] = [];
@@ -321,10 +325,10 @@ export class PdfController {
       console.log(`✅ Created ${splitFiles.length} split file(s)`);
 
       // Create ZIP file
-      await this.pdfService.createZip(splitFiles, zipPath);
+      await createZip(splitFiles, zipPath);
 
       // Get ZIP file size
-      const zipSize = await this.pdfService.getFileSize(zipPath);
+      const zipSize = await getFileSize(zipPath);
 
       // Set response headers
       res.setHeader('Content-Type', 'application/zip');
@@ -380,7 +384,7 @@ export class PdfController {
     console.log('\n🧹 Cleaning up split files...');
 
     // Delete split files
-    await this.pdfService.deleteFiles(splitFiles);
+    await deleteFiles(splitFiles);
 
     // Delete output directory
     try {
@@ -395,7 +399,7 @@ export class PdfController {
     // Delete other files (input, zip)
     for (const file of filesToCleanup) {
       if (file !== outputDir) {
-        await this.pdfService.deleteFile(file);
+        await deleteFile(file);
       }
     }
 
@@ -428,17 +432,17 @@ export class PdfController {
   )
   async getPageCount(@UploadedFile() file: Express.Multer.File) {
     try {
-      const pageCount = await this.pdfService.getPageCount(file.path);
+      const pageCount = await getPageCount(file.path);
 
       // Cleanup
-      await this.pdfService.deleteFile(file.path);
+      await deleteFile(file.path);
 
       return {
         pageCount,
         filename: file.originalname,
       };
     } catch (error) {
-      await this.pdfService.deleteFile(file.path);
+      await deleteFile(file.path);
       throw error;
     }
   }
