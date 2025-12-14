@@ -1,7 +1,9 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
+  InternalServerErrorException,
   Post,
   Res,
   UploadedFile,
@@ -14,7 +16,10 @@ import { diskStorage } from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import { extname } from 'path';
 import type { Response } from 'express';
-import * as fs from 'fs';
+// import * as fs from 'fs';
+import { SplitMethod, SplitPdfDto } from './dto/split-pdf.dto';
+import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 
 @Controller('pdf')
 export class PdfController {
@@ -165,7 +170,7 @@ export class PdfController {
       res.setHeader('Content-Length', outputSize);
 
       // Stream the file
-      const fileStream = fs.createReadStream(outputPath);
+      const fileStream = fsSync.createReadStream(outputPath);
 
       fileStream.on('error', async (error) => {
         console.error('❌ Stream error:', error);
@@ -214,5 +219,227 @@ export class PdfController {
     await this.pdfService.deleteFile(outputPath);
 
     console.log('✅ Cleanup complete\n');
+  }
+
+  @Post('split')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        if (file.mimetype !== 'application/pdf') {
+          return callback(
+            new BadRequestException('Only PDF files are allowed'),
+            false,
+          );
+        }
+        callback(null, true);
+      },
+      limits: {
+        fileSize: 50 * 1024 * 1024,
+      },
+    }),
+  )
+  async splitPdf(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() splitDto: SplitPdfDto,
+    @Res() res: Response,
+  ) {
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`✂️  SPLIT REQUEST - Method: ${splitDto.method}`);
+    console.log(`${'='.repeat(50)}`);
+
+    const jobId = uuidv4();
+    const inputPath = file.path;
+    const outputDir = `./temp/${jobId}-splits`;
+    const zipPath = `./temp/${jobId}-splits.zip`;
+    const filesToCleanup: string[] = [inputPath, zipPath];
+
+    try {
+      // Create output directory
+      await fs.mkdir(outputDir, { recursive: true });
+      filesToCleanup.push(outputDir);
+
+      // Get page count
+      const pageCount = await this.pdfService.getPageCount(inputPath);
+      console.log(`📄 PDF has ${pageCount} pages`);
+
+      let splitFiles: string[] = [];
+
+      // Execute split based on method
+      switch (splitDto.method) {
+        case SplitMethod.RANGES:
+          if (!splitDto.ranges) {
+            throw new BadRequestException(
+              'Ranges are required for ranges method',
+            );
+          }
+          const ranges = splitDto.ranges.split(',').map((r) => r.trim());
+          console.log(`📋 Ranges: ${ranges.join(', ')}`);
+          splitFiles = await this.pdfService.splitByRanges(
+            inputPath,
+            ranges,
+            outputDir,
+          );
+          break;
+
+        case SplitMethod.INDIVIDUAL:
+          console.log(`📋 Splitting into individual pages`);
+          splitFiles = await this.pdfService.splitIntoPages(
+            inputPath,
+            outputDir,
+          );
+          break;
+
+        case SplitMethod.EVERY_N:
+          if (!splitDto.pagesPerSplit || splitDto.pagesPerSplit < 1) {
+            throw new BadRequestException(
+              'pagesPerSplit must be at least 1 for every_n method',
+            );
+          }
+          console.log(`📋 Splitting every ${splitDto.pagesPerSplit} pages`);
+          splitFiles = await this.pdfService.splitEveryNPages(
+            inputPath,
+            splitDto.pagesPerSplit,
+            outputDir,
+          );
+          break;
+
+        default:
+          throw new BadRequestException('Invalid split method');
+      }
+
+      if (splitFiles.length === 0) {
+        throw new InternalServerErrorException('No files were created');
+      }
+
+      console.log(`✅ Created ${splitFiles.length} split file(s)`);
+
+      // Create ZIP file
+      await this.pdfService.createZip(splitFiles, zipPath);
+
+      // Get ZIP file size
+      const zipSize = await this.pdfService.getFileSize(zipPath);
+
+      // Set response headers
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="split-${Date.now()}.zip"`,
+      );
+      res.setHeader('Content-Length', zipSize);
+
+      // Stream the ZIP file
+      const fileStream = fsSync.createReadStream(zipPath);
+
+      fileStream.on('error', async (error) => {
+        console.error('❌ Stream error:', error);
+        await this.cleanupSplitFiles(filesToCleanup, outputDir, splitFiles);
+        if (!res.headersSent) {
+          res.status(500).json({
+            message: 'Error streaming file',
+            error: error.message,
+          });
+        }
+      });
+
+      fileStream.on('end', async () => {
+        console.log('✅ ZIP streamed successfully');
+        setTimeout(async () => {
+          await this.cleanupSplitFiles(filesToCleanup, outputDir, splitFiles);
+        }, 1000);
+      });
+
+      fileStream.pipe(res);
+    } catch (error) {
+      console.error('❌ Split operation failed:', error);
+      await this.cleanupSplitFiles(filesToCleanup, outputDir, []);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          message: 'Failed to split PDF',
+          error: error.message,
+        });
+      }
+    }
+  }
+
+  /**
+   * Cleanup helper for split operation
+   */
+  private async cleanupSplitFiles(
+    filesToCleanup: string[],
+    outputDir: string,
+    splitFiles: string[],
+  ) {
+    console.log('\n🧹 Cleaning up split files...');
+
+    // Delete split files
+    await this.pdfService.deleteFiles(splitFiles);
+
+    // Delete output directory
+    try {
+      if (fsSync.existsSync(outputDir)) {
+        await fs.rm(outputDir, { recursive: true, force: true });
+        console.log(`🗑️  Deleted directory: ${outputDir}`);
+      }
+    } catch (error) {
+      console.error(`Failed to delete directory ${outputDir}:`, error.message);
+    }
+
+    // Delete other files (input, zip)
+    for (const file of filesToCleanup) {
+      if (file !== outputDir) {
+        await this.pdfService.deleteFile(file);
+      }
+    }
+
+    console.log('✅ Cleanup complete\n');
+  }
+
+  @Post('page-count')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        if (file.mimetype !== 'application/pdf') {
+          return callback(
+            new BadRequestException('Only PDF files are allowed'),
+            false,
+          );
+        }
+        callback(null, true);
+      },
+      limits: {
+        fileSize: 50 * 1024 * 1024,
+      },
+    }),
+  )
+  async getPageCount(@UploadedFile() file: Express.Multer.File) {
+    try {
+      const pageCount = await this.pdfService.getPageCount(file.path);
+
+      // Cleanup
+      await this.pdfService.deleteFile(file.path);
+
+      return {
+        pageCount,
+        filename: file.originalname,
+      };
+    } catch (error) {
+      await this.pdfService.deleteFile(file.path);
+      throw error;
+    }
   }
 }
