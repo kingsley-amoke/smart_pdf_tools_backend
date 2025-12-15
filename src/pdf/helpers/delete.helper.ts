@@ -1,7 +1,8 @@
 import * as fs from 'fs/promises';
 import { fileExists } from './check-file-exist.helper';
 
-export async function deleteFile(filePath: string): Promise<void> {
+export async function deleteFile(filePath?: string): Promise<void> {
+  if (!filePath) return;
   try {
     if (fileExists(filePath)) {
       await fs.unlink(filePath);
@@ -12,7 +13,8 @@ export async function deleteFile(filePath: string): Promise<void> {
   }
 }
 
-export async function deleteFiles(filePaths: string[]): Promise<void> {
+export async function deleteFiles(filePaths?: string[]): Promise<void> {
+  if (!filePaths || filePaths.length === 0) return;
   for (const filePath of filePaths) {
     await deleteFile(filePath);
   }

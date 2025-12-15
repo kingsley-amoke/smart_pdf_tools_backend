@@ -24,6 +24,8 @@ import { deleteFile, deleteFiles } from './helpers/delete.helper';
 import { createZip } from './helpers/create-zip.helper';
 import { getPageCount } from './helpers/get-page-count.helper';
 import { getFileSize } from './helpers/check-file-size.helper';
+import { CompressPdfDto } from './dto/compress-pdf.dto';
+import { getCompressionStats } from './helpers/get-compression-stat.helper';
 
 @Controller('pdf')
 export class PdfController {
@@ -213,7 +215,7 @@ export class PdfController {
   /**
    * Cleanup helper - delete temporary files
    */
-  private async cleanup(inputPaths: string[], outputPath: string) {
+  private async cleanup(inputPaths: string[], outputPath?: string) {
     console.log('\n🧹 Cleaning up temporary files...');
 
     // Delete input files
@@ -444,6 +446,119 @@ export class PdfController {
     } catch (error) {
       await deleteFile(file.path);
       throw error;
+    }
+  }
+
+  //COMPRESS PDF
+  @Post('compress')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        if (file.mimetype !== 'application/pdf') {
+          return callback(
+            new BadRequestException('Only PDF files are allowed'),
+            false,
+          );
+        }
+        callback(null, true);
+      },
+      limits: {
+        fileSize: 100 * 1024 * 1024, // 100MB for compression
+      },
+    }),
+  )
+  async compressPdf(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() compressDto: CompressPdfDto,
+    @Res() res: Response,
+  ) {
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`🗜️  COMPRESS REQUEST - Quality: ${compressDto.quality}`);
+    console.log(`${'='.repeat(50)}`);
+
+    const jobId = uuidv4();
+    const inputPath = file.path;
+    const outputPath = `./temp/${jobId}-compressed.pdf`;
+    const filesToCleanup: string[] = [inputPath, outputPath];
+
+    try {
+      console.log(`📄 Original file: ${file.originalname}`);
+      console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+      console.log(`⚙️  Options:`);
+      console.log(
+        `   - Compress images: ${compressDto.compressImages !== false}`,
+      );
+      console.log(
+        `   - Remove metadata: ${compressDto.removeMetadata || false}`,
+      );
+
+      // Compress PDF
+      await this.pdfService.compressPdf(
+        inputPath,
+        outputPath,
+        compressDto.quality as any,
+        {
+          compressImages: compressDto.compressImages !== false,
+          removeMetadata: compressDto.removeMetadata || false,
+        },
+      );
+
+      // Get compression statistics
+      const stats = await getCompressionStats(inputPath, outputPath);
+
+      // Get compressed file size
+      const outputSize = await getFileSize(outputPath);
+
+      // Set response headers
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="compressed-${Date.now()}.pdf"`,
+      );
+      res.setHeader('Content-Length', outputSize);
+      res.setHeader('X-Original-Size', stats.originalSize.toString());
+      res.setHeader('X-Compressed-Size', stats.compressedSize.toString());
+      res.setHeader('X-Reduction-Percentage', stats.reductionPercentage);
+
+      // Stream the file
+      const fileStream = fsSync.createReadStream(outputPath);
+
+      fileStream.on('error', async (error) => {
+        console.error('❌ Stream error:', error);
+        await this.cleanup(filesToCleanup);
+        if (!res.headersSent) {
+          res.status(500).json({
+            message: 'Error streaming file',
+            error: error.message,
+          });
+        }
+      });
+
+      fileStream.on('end', async () => {
+        console.log('✅ File streamed successfully');
+        setTimeout(async () => {
+          await this.cleanup(filesToCleanup);
+        }, 1000);
+      });
+
+      fileStream.pipe(res);
+    } catch (error) {
+      console.error('❌ Compress operation failed:', error);
+      await this.cleanup(filesToCleanup);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          message: 'Failed to compress PDF',
+          error: error.message,
+        });
+      }
     }
   }
 }
