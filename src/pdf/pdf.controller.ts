@@ -26,6 +26,7 @@ import { getPageCount } from './helpers/get-page-count.helper';
 import { getFileSize } from './helpers/check-file-size.helper';
 import { CompressPdfDto } from './dto/compress-pdf.dto';
 import { getCompressionStats } from './helpers/get-compression-stat.helper';
+import { ConvertPdfToImagesDto } from './dto/convert-pdf.dto';
 
 @Controller('pdf')
 export class PdfController {
@@ -559,6 +560,254 @@ export class PdfController {
           error: error.message,
         });
       }
+    }
+  }
+
+  //Convert PDF to Images
+  @Post('convert/to-images')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        if (file.mimetype !== 'application/pdf') {
+          return callback(
+            new BadRequestException('Only PDF files are allowed'),
+            false,
+          );
+        }
+        callback(null, true);
+      },
+      limits: {
+        fileSize: 100 * 1024 * 1024,
+      },
+    }),
+  )
+  async convertPdfToImages(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() convertDto: ConvertPdfToImagesDto,
+    @Res() res: Response,
+  ) {
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`🖼️  CONVERT TO IMAGES - Format: ${convertDto.format}`);
+    console.log(`${'='.repeat(50)}`);
+
+    const jobId = uuidv4();
+    const inputPath = file.path;
+    const outputDir = `./temp/${jobId}-images`;
+    const zipPath = `./temp/${jobId}-images.zip`;
+    const filesToCleanup: string[] = [inputPath, zipPath];
+
+    try {
+      // Create output directory
+      await fs.mkdir(outputDir, { recursive: true });
+      filesToCleanup.push(outputDir);
+
+      console.log(`📄 File: ${file.originalname}`);
+      console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+
+      // Convert PDF to images
+      const imageFiles = await this.pdfService.convertPdfToImages(
+        inputPath,
+        outputDir,
+        convertDto.format as any,
+        convertDto.quality || 90,
+      );
+
+      if (imageFiles.length === 0) {
+        throw new InternalServerErrorException('No images were created');
+      }
+
+      console.log(`✅ Created ${imageFiles.length} image(s)`);
+
+      // Create ZIP file
+      await createZip(imageFiles, zipPath);
+
+      // Get ZIP file size
+      const zipSize = await getFileSize(zipPath);
+
+      // Set response headers
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="pdf-images-${Date.now()}.zip"`,
+      );
+      res.setHeader('Content-Length', zipSize);
+
+      // Stream the ZIP file
+      const fileStream = fsSync.createReadStream(zipPath);
+
+      fileStream.on('error', async (error) => {
+        console.error('❌ Stream error:', error);
+        await this.cleanupSplitFiles(filesToCleanup, outputDir, imageFiles);
+        if (!res.headersSent) {
+          res.status(500).json({
+            message: 'Error streaming file',
+            error: error.message,
+          });
+        }
+      });
+
+      fileStream.on('end', async () => {
+        console.log('✅ ZIP streamed successfully');
+        setTimeout(async () => {
+          await this.cleanupSplitFiles(filesToCleanup, outputDir, imageFiles);
+        }, 1000);
+      });
+
+      fileStream.pipe(res);
+    } catch (error) {
+      console.error('❌ Convert to images failed:', error);
+      await this.cleanupSplitFiles(filesToCleanup, outputDir, []);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          message: 'Failed to convert PDF to images',
+          error: error.message,
+        });
+      }
+    }
+  }
+
+  @Post('convert/images-to-pdf')
+  @UseInterceptors(
+    FilesInterceptor('files', 50, {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        const allowedMimes = ['image/png', 'image/jpeg', 'image/jpg'];
+        if (allowedMimes.includes(file.mimetype)) {
+          callback(null, true);
+        } else {
+          callback(
+            new BadRequestException('Only PNG and JPG images are allowed'),
+            false,
+          );
+        }
+      },
+      limits: {
+        fileSize: 10 * 1024 * 1024, // 10MB per image
+      },
+    }),
+  )
+  async convertImagesToPdf(
+    @UploadedFiles() files: Express.Multer.File[],
+    @Res() res: Response,
+  ) {
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`📄 IMAGES TO PDF - ${files.length} images`);
+    console.log(`${'='.repeat(50)}`);
+
+    if (!files || files.length === 0) {
+      throw new BadRequestException('At least one image is required');
+    }
+
+    const jobId = uuidv4();
+    const outputPath = `./temp/${jobId}-from-images.pdf`;
+    const inputPaths: string[] = files.map((f) => f.path);
+    const filesToCleanup: string[] = [...inputPaths, outputPath];
+
+    try {
+      files.forEach((file, index) => {
+        console.log(
+          `${index + 1}. ${file.originalname} (${(file.size / 1024).toFixed(2)} KB)`,
+        );
+      });
+
+      // Convert images to PDF
+      await this.pdfService.convertImagesToPdf(inputPaths, outputPath);
+
+      // Get PDF file size
+      const pdfSize = await getFileSize(outputPath);
+
+      // Set response headers
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="from-images-${Date.now()}.pdf"`,
+      );
+      res.setHeader('Content-Length', pdfSize);
+
+      // Stream the file
+      const fileStream = fsSync.createReadStream(outputPath);
+
+      fileStream.on('error', async (error) => {
+        console.error('❌ Stream error:', error);
+        await this.cleanup(filesToCleanup);
+        if (!res.headersSent) {
+          res.status(500).json({
+            message: 'Error streaming file',
+            error: error.message,
+          });
+        }
+      });
+
+      fileStream.on('end', async () => {
+        console.log('✅ File streamed successfully');
+        setTimeout(async () => {
+          await this.cleanup(filesToCleanup);
+        }, 1000);
+      });
+
+      fileStream.pipe(res);
+    } catch (error) {
+      console.error('❌ Images to PDF conversion failed:', error);
+      await this.cleanup(filesToCleanup);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          message: 'Failed to convert images to PDF',
+          error: error.message,
+        });
+      }
+    }
+  }
+
+  @Post('extract/metadata')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        if (file.mimetype !== 'application/pdf') {
+          return callback(
+            new BadRequestException('Only PDF files are allowed'),
+            false,
+          );
+        }
+        callback(null, true);
+      },
+    }),
+  )
+  async extractMetadata(@UploadedFile() file: Express.Multer.File) {
+    try {
+      const metadata = await this.pdfService.extractMetadata(file.path);
+
+      // Cleanup
+      await deleteFile(file.path);
+
+      return {
+        filename: file.originalname,
+        metadata,
+      };
+    } catch (error) {
+      await deleteFile(file.path);
+      throw error;
     }
   }
 }
