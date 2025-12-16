@@ -1,4 +1,11 @@
-import { IsEnum, IsOptional, IsNumber, Min, Max } from 'class-validator';
+import {
+  IsEnum,
+  IsOptional,
+  IsNumber,
+  Min,
+  Max,
+  IsBoolean,
+} from 'class-validator';
 
 export enum ImageFormat {
   PNG = 'png',
@@ -19,4 +26,16 @@ export class ConvertPdfToImagesDto {
 
 export class ConvertImagesToPdfDto {
   // No specific fields needed for now
+}
+
+export class ConvertPdfToDocxDto {
+  @IsOptional()
+  @IsBoolean()
+  preserveFormatting?: boolean;
+}
+
+export class ConvertDocxToPdfDto {
+  @IsOptional()
+  @IsBoolean()
+  preserveFormatting?: boolean;
 }

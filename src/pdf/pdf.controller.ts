@@ -26,7 +26,13 @@ import { getPageCount } from './helpers/get-page-count.helper';
 import { getFileSize } from './helpers/check-file-size.helper';
 import { CompressPdfDto } from './dto/compress-pdf.dto';
 import { getCompressionStats } from './helpers/get-compression-stat.helper';
-import { ConvertPdfToImagesDto } from './dto/convert-pdf.dto';
+import {
+  ConvertDocxToPdfDto,
+  ConvertPdfToDocxDto,
+  ConvertPdfToImagesDto,
+} from './dto/convert-pdf.dto';
+import { extractMetadata } from './helpers/extract-metadata.helper';
+import { cleanup } from './helpers/cleanup.helper';
 
 @Controller('pdf')
 export class PdfController {
@@ -112,6 +118,8 @@ export class PdfController {
     };
   }
 
+  //MERGE PDF
+
   @Post('merge')
   @UseInterceptors(
     FilesInterceptor('files', 10, {
@@ -181,7 +189,7 @@ export class PdfController {
 
       fileStream.on('error', async (error) => {
         console.error('❌ Stream error:', error);
-        await this.cleanup(inputPaths, outputPath);
+        await cleanup(inputPaths, outputPath);
         if (!res.headersSent) {
           res.status(500).json({
             message: 'Error streaming file',
@@ -194,7 +202,7 @@ export class PdfController {
         console.log('✅ File streamed successfully');
         // Cleanup after a short delay to ensure stream completes
         setTimeout(async () => {
-          await this.cleanup(inputPaths, outputPath);
+          await cleanup(inputPaths, outputPath);
         }, 1000);
       });
 
@@ -202,7 +210,7 @@ export class PdfController {
       fileStream.pipe(res);
     } catch (error) {
       console.error('❌ Merge operation failed:', error);
-      await this.cleanup(inputPaths, outputPath);
+      await cleanup(inputPaths, outputPath);
 
       if (!res.headersSent) {
         res.status(500).json({
@@ -213,20 +221,7 @@ export class PdfController {
     }
   }
 
-  /**
-   * Cleanup helper - delete temporary files
-   */
-  private async cleanup(inputPaths: string[], outputPath?: string) {
-    console.log('\n🧹 Cleaning up temporary files...');
-
-    // Delete input files
-    await deleteFiles(inputPaths);
-
-    // Delete output file
-    await deleteFile(outputPath);
-
-    console.log('✅ Cleanup complete\n');
-  }
+  //SPLIT PDF
 
   @Post('split')
   @UseInterceptors(
@@ -409,6 +404,8 @@ export class PdfController {
     console.log('✅ Cleanup complete\n');
   }
 
+  //GET PAGE COUNT
+
   @Post('page-count')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -533,7 +530,7 @@ export class PdfController {
 
       fileStream.on('error', async (error) => {
         console.error('❌ Stream error:', error);
-        await this.cleanup(filesToCleanup);
+        await cleanup(filesToCleanup);
         if (!res.headersSent) {
           res.status(500).json({
             message: 'Error streaming file',
@@ -545,14 +542,14 @@ export class PdfController {
       fileStream.on('end', async () => {
         console.log('✅ File streamed successfully');
         setTimeout(async () => {
-          await this.cleanup(filesToCleanup);
+          await cleanup(filesToCleanup);
         }, 1000);
       });
 
       fileStream.pipe(res);
     } catch (error) {
       console.error('❌ Compress operation failed:', error);
-      await this.cleanup(filesToCleanup);
+      await cleanup(filesToCleanup);
 
       if (!res.headersSent) {
         res.status(500).json({
@@ -674,6 +671,8 @@ export class PdfController {
     }
   }
 
+  //Convert Images to PDF
+
   @Post('convert/images-to-pdf')
   @UseInterceptors(
     FilesInterceptor('files', 50, {
@@ -743,7 +742,7 @@ export class PdfController {
 
       fileStream.on('error', async (error) => {
         console.error('❌ Stream error:', error);
-        await this.cleanup(filesToCleanup);
+        await cleanup(filesToCleanup);
         if (!res.headersSent) {
           res.status(500).json({
             message: 'Error streaming file',
@@ -755,14 +754,14 @@ export class PdfController {
       fileStream.on('end', async () => {
         console.log('✅ File streamed successfully');
         setTimeout(async () => {
-          await this.cleanup(filesToCleanup);
+          await cleanup(filesToCleanup);
         }, 1000);
       });
 
       fileStream.pipe(res);
     } catch (error) {
       console.error('❌ Images to PDF conversion failed:', error);
-      await this.cleanup(filesToCleanup);
+      await cleanup(filesToCleanup);
 
       if (!res.headersSent) {
         res.status(500).json({
@@ -772,6 +771,8 @@ export class PdfController {
       }
     }
   }
+
+  //Extract Metadata
 
   @Post('extract/metadata')
   @UseInterceptors(
@@ -796,7 +797,7 @@ export class PdfController {
   )
   async extractMetadata(@UploadedFile() file: Express.Multer.File) {
     try {
-      const metadata = await this.pdfService.extractMetadata(file.path);
+      const metadata = await extractMetadata(file.path);
 
       // Cleanup
       await deleteFile(file.path);
@@ -808,6 +809,200 @@ export class PdfController {
     } catch (error) {
       await deleteFile(file.path);
       throw error;
+    }
+  }
+
+  //Convert PDF to DOCX
+
+  @Post('convert/to-docx')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        if (file.mimetype !== 'application/pdf') {
+          return callback(
+            new BadRequestException('Only PDF files are allowed'),
+            false,
+          );
+        }
+        callback(null, true);
+      },
+      limits: {
+        fileSize: 100 * 1024 * 1024,
+      },
+    }),
+  )
+  async convertPdfToDocx(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() convertDto: ConvertPdfToDocxDto,
+    @Res() res: Response,
+  ) {
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`📄 CONVERT PDF TO DOCX`);
+    console.log(`${'='.repeat(50)}`);
+
+    const jobId = uuidv4();
+    const inputPath = file.path;
+    const outputPath = `./temp/${jobId}-converted.docx`;
+    const filesToCleanup: string[] = [inputPath, outputPath];
+
+    try {
+      console.log(`📄 File: ${file.originalname}`);
+      console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+
+      // Convert PDF to DOCX
+      await this.pdfService.convertPdfToDocx(inputPath, outputPath);
+
+      // Get output file size
+      const outputSize = await getFileSize(outputPath);
+
+      // Set response headers
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="converted-${Date.now()}.docx"`,
+      );
+      res.setHeader('Content-Length', outputSize);
+
+      // Stream the file
+      const fileStream = fsSync.createReadStream(outputPath);
+
+      fileStream.on('error', async (error) => {
+        console.error('❌ Stream error:', error);
+        await cleanup(filesToCleanup);
+        if (!res.headersSent) {
+          res.status(500).json({
+            message: 'Error streaming file',
+            error: error.message,
+          });
+        }
+      });
+
+      fileStream.on('end', async () => {
+        console.log('✅ File streamed successfully');
+        setTimeout(async () => {
+          await cleanup(filesToCleanup);
+        }, 1000);
+      });
+
+      fileStream.pipe(res);
+    } catch (error) {
+      console.error('❌ Convert to DOCX failed:', error);
+      await cleanup(filesToCleanup);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          message: 'Failed to convert PDF to DOCX',
+          error: error.message,
+        });
+      }
+    }
+  }
+
+  //Convert DOCX to PDF
+
+  @Post('convert/docx-to-pdf')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './temp',
+        filename: (req, file, callback) => {
+          const uniqueName = `${uuidv4()}${extname(file.originalname)}`;
+          callback(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, callback) => {
+        const allowedMimes = [
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+          'application/msword', // .doc
+        ];
+        if (allowedMimes.includes(file.mimetype)) {
+          callback(null, true);
+        } else {
+          callback(
+            new BadRequestException('Only DOC/DOCX files are allowed'),
+            false,
+          );
+        }
+      },
+      limits: {
+        fileSize: 100 * 1024 * 1024,
+      },
+    }),
+  )
+  async convertDocxToPdf(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() convertDto: ConvertDocxToPdfDto,
+    @Res() res: Response,
+  ) {
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`📄 CONVERT DOCX TO PDF`);
+    console.log(`${'='.repeat(50)}`);
+
+    const jobId = uuidv4();
+    const inputPath = file.path;
+    const outputPath = `./temp/${jobId}-converted.pdf`;
+    const filesToCleanup: string[] = [inputPath, outputPath];
+
+    try {
+      console.log(`📄 File: ${file.originalname}`);
+      console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+
+      // Convert DOCX to PDF
+      await this.pdfService.convertDocxToPdf(inputPath, outputPath);
+
+      // Get output file size
+      const outputSize = await getFileSize(outputPath);
+
+      // Set response headers
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="converted-${Date.now()}.pdf"`,
+      );
+      res.setHeader('Content-Length', outputSize);
+
+      // Stream the file
+      const fileStream = fsSync.createReadStream(outputPath);
+
+      fileStream.on('error', async (error) => {
+        console.error('❌ Stream error:', error);
+        await cleanup(filesToCleanup);
+        if (!res.headersSent) {
+          res.status(500).json({
+            message: 'Error streaming file',
+            error: error.message,
+          });
+        }
+      });
+
+      fileStream.on('end', async () => {
+        console.log('✅ File streamed successfully');
+        setTimeout(async () => {
+          await cleanup(filesToCleanup);
+        }, 1000);
+      });
+
+      fileStream.pipe(res);
+    } catch (error) {
+      console.error('❌ Convert to PDF failed:', error);
+      await cleanup(filesToCleanup);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          message: 'Failed to convert DOCX to PDF',
+          error: error.message,
+        });
+      }
     }
   }
 }
