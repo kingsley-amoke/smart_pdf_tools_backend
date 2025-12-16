@@ -34,7 +34,7 @@ import {
 import { extractMetadata } from './helpers/extract-metadata.helper';
 import { cleanup } from './helpers/cleanup.helper';
 
-@Controller('pdf')
+@Controller('api/v1/pdf')
 export class PdfController {
   constructor(private readonly pdfService: PdfService) {}
 

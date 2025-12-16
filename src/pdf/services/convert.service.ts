@@ -197,16 +197,7 @@ export class ConvertService {
   }
 
   // CONVERT PDF TO DOCX
-  /**
-   * Convert PDF to DOCX using LibreOffice (FIXED)
-   * @param inputPath Path to PDF file
-   * @param outputPath Path where DOCX will be saved
-   */
-  /**
-   * Convert PDF to DOCX using LibreOffice (ENHANCED)
-   * @param inputPath Path to PDF file
-   * @param outputPath Path where DOCX will be saved
-   */
+
   async convertPdfToDocx(inputPath: string, outputPath: string): Promise<void> {
     try {
       console.log(`📄 Converting PDF to DOCX`);
@@ -260,7 +251,7 @@ export class ConvertService {
       }
 
       // Build conversion command with better error handling
-      const command = `${libreOfficeCmd} --headless --invisible --nologo --nofirststartwizard --convert-to docx:"MS Word 2007 XML" --outdir "${absoluteOutputDir}" "${absoluteInputPath}"`;
+      const command = `${libreOfficeCmd} --headless --infilter="writer_pdf_import" --invisible --nologo --nofirststartwizard --convert-to docx:"MS Word 2007 XML" --outdir "${absoluteOutputDir}" "${absoluteInputPath}"`;
 
       console.log(`⚙️  Running LibreOffice...`);
 
@@ -377,11 +368,6 @@ export class ConvertService {
 
   // CONVERT DOCX TO PDF
 
-  /**
-   * Convert DOCX to PDF using LibreOffice (FIXED)
-   * @param inputPath Path to DOCX file
-   * @param outputPath Path where PDF will be saved
-   */
   async convertDocxToPdf(inputPath: string, outputPath: string): Promise<void> {
     try {
       console.log(`📄 Converting DOCX to PDF`);

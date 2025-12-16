@@ -1,7 +1,11 @@
 {
   "name": "pdf_smart_tools",
-  "version": "0.0.1",
-  "description": "",
+  "version": "1.0.0",
+  "description": "PDF Utility Backend API",
+  "engines": {
+    "node": ">=25.0.0",
+    "npm": ">=10.0.0"
+  },
   "author": "",
   "private": true,
   "license": "UNLICENSED",
