@@ -35,6 +35,7 @@
     "dotenv": "^17.2.3",
     "html-pdf-node": "^1.0.8",
     "jimp": "^1.6.0",
+    "libreoffice-convert": "^1.7.0",
     "mammoth": "^1.11.0",
     "multer": "^2.0.2",
     "officegen": "^0.6.5",

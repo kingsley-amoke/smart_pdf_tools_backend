@@ -1,5 +1,4 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
-import mammoth from 'mammoth';
 import { execSync } from 'child_process';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
@@ -7,7 +6,9 @@ import { fileExists } from '../helpers/check-file-exist.helper';
 import { getFileSize } from '../helpers/check-file-size.helper';
 import { ImageFormat } from '../dto/convert-pdf.dto';
 import { PDFDocument } from 'pdf-lib';
-import path from 'path';
+import libre from 'libreoffice-convert';
+import { promisify } from 'util';
+import * as path from 'path';
 
 @Injectable()
 export class ConvertService {
@@ -233,6 +234,15 @@ export class ConvertService {
         console.error('⚠️  Could not analyze PDF:', pdfError.message);
       }
 
+      try {
+        execSync('pkill -9 soffice.bin 2>/dev/null || true', { stdio: 'pipe' });
+        execSync('pkill -9 soffice 2>/dev/null || true', { stdio: 'pipe' });
+        // Wait a moment for processes to die
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } catch (error) {
+        // Ignore errors if no processes found
+      }
+
       // Check LibreOffice installation
       let libreOfficeCmd = 'soffice';
       try {
@@ -373,88 +383,80 @@ export class ConvertService {
       console.log(`📄 Converting DOCX to PDF`);
       const startTime = Date.now();
 
-      // Check if LibreOffice is installed
-      try {
-        execSync('which soffice || which libreoffice', { stdio: 'pipe' });
-      } catch (error) {
-        throw new InternalServerErrorException(
-          'LibreOffice is not installed. Please install LibreOffice for DOCX to PDF conversion.',
-        );
-      }
+      console.log(`📂 Input: ${inputPath}`);
+      console.log(`📂 Output: ${outputPath}`);
 
-      // Get the directory where output file will be saved
+      // Verify input file exists
+      const inputStats = await fs.stat(inputPath);
+      console.log(
+        `📦 Input size: ${(inputStats.size / 1024 / 1024).toFixed(2)} MB`,
+      );
+
+      // Ensure output directory exists
       const outputDir = path.dirname(outputPath);
-
-      // LibreOffice command to convert DOCX to PDF
-      const command = `soffice --headless --convert-to pdf --outdir "${outputDir}" "${inputPath}"`;
+      await fs.mkdir(outputDir, { recursive: true });
 
       console.log(`⚙️  Running LibreOffice conversion...`);
-      console.log(`📂 Input: ${inputPath}`);
-      console.log(`📂 Output dir: ${outputDir}`);
 
-      try {
-        execSync(command, {
-          stdio: 'pipe',
-          timeout: 60000,
-        });
-      } catch (execError) {
-        // Try alternative command
-        const altCommand = `libreoffice --headless --convert-to pdf --outdir "${outputDir}" "${inputPath}"`;
-        try {
-          execSync(altCommand, {
-            stdio: 'pipe',
-            timeout: 60000,
+      // Read the DOCX file as buffer
+      const docxBuffer = await fs.readFile(inputPath);
+
+      // Convert to PDF with timeout
+      const pdfBuffer = await Promise.race([
+        new Promise<Buffer>((resolve, reject) => {
+          libre.convert(docxBuffer, '.pdf', undefined, (err, result) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(result);
+            }
           });
-        } catch (altError) {
-          throw new InternalServerErrorException(
-            'LibreOffice conversion failed. Make sure LibreOffice is installed correctly.',
-          );
-        }
-      }
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Conversion timed out after 60 seconds')),
+            60000,
+          ),
+        ),
+      ]);
 
-      // LibreOffice creates file with the input file's base name but .pdf extension
-      const inputBaseName = path.basename(inputPath, path.extname(inputPath));
-      const generatedPath = path.join(outputDir, `${inputBaseName}.pdf`);
-
-      console.log(`🔍 Looking for generated file: ${generatedPath}`);
-
-      // Wait a moment for file to be fully written
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Verify file was created
-      if (!fileExists(generatedPath)) {
-        // List files in directory for debugging
-        const files = await fs.readdir(outputDir);
-        console.error(
-          `❌ Generated file not found. Files in directory:`,
-          files,
-        );
-        throw new InternalServerErrorException(
-          `PDF file was not created. Expected: ${generatedPath}`,
-        );
-      }
-
-      // Rename to desired output path if different
-      if (generatedPath !== outputPath) {
-        console.log(`📝 Renaming: ${generatedPath} -> ${outputPath}`);
-        await fs.rename(generatedPath, outputPath);
-      }
-
-      // Final verification
-      if (!fileExists(outputPath)) {
-        throw new InternalServerErrorException('Failed to create output file');
-      }
+      // Write the PDF buffer to file
+      await fs.writeFile(outputPath, pdfBuffer);
 
       const endTime = Date.now();
-      const outputSize = await getFileSize(outputPath);
+      const outputStats = await fs.stat(outputPath);
 
       console.log(`✅ Conversion complete in ${endTime - startTime}ms`);
       console.log(
-        `📦 Output size: ${(outputSize / 1024 / 1024).toFixed(2)} MB`,
+        `📦 Output size: ${(outputStats.size / 1024 / 1024).toFixed(2)} MB`,
       );
       console.log(`📄 Final output: ${outputPath}`);
     } catch (error) {
       console.error('❌ DOCX to PDF conversion failed:', error);
+
+      // Clean up partial output file if it exists
+      try {
+        await fs.unlink(outputPath);
+      } catch (cleanupError) {
+        // Ignore cleanup errors
+      }
+
+      // Provide helpful error messages
+      if (
+        error.message?.includes('LibreOffice') ||
+        error.message?.includes('soffice')
+      ) {
+        throw new InternalServerErrorException(
+          'LibreOffice is not installed. Install it with: sudo apt-get install libreoffice',
+        );
+      }
+
+      if (error.message?.includes('timed out')) {
+        throw new InternalServerErrorException(
+          'Conversion timed out. The document may be too large or complex.',
+        );
+      }
+
       throw new InternalServerErrorException(
         `Failed to convert DOCX to PDF: ${error.message}`,
       );
